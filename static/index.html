@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Starcount — how dark is your sky?</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,500&family=Space+Grotesk:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#080D1F; --panel:#0F1730; --line:#232E52;
+    --star:#F2EFE4; --dim:#8B94B5; --detect:#5DCAA5; --amber:#EFB35C;
+  }
+  *{box-sizing:border-box; margin:0}
+  body{
+    background:var(--ink); color:var(--star);
+    font-family:'Space Grotesk',sans-serif; min-height:100vh;
+  }
+  .wrap{max-width:860px; margin:0 auto; padding:48px 24px 80px}
+  header{display:flex; align-items:baseline; justify-content:space-between; gap:16px; flex-wrap:wrap}
+  .brand{font-family:'Fraunces',serif; font-weight:500; font-size:20px; letter-spacing:0.02em}
+  .brand em{color:var(--detect); font-style:normal}
+  .tag{color:var(--dim); font-size:13px}
+  h1{
+    font-family:'Fraunces',serif; font-weight:300; font-size:clamp(30px,5.4vw,46px);
+    line-height:1.12; margin:56px 0 14px; max-width:15ch;
+  }
+  h1 em{font-style:italic; color:var(--amber)}
+  .sub{color:var(--dim); font-size:15px; line-height:1.65; max-width:52ch}
+
+  .drop{
+    margin-top:36px; position:relative; border:1px dashed var(--line);
+    border-radius:14px; background:var(--panel); overflow:hidden;
+    min-height:280px; display:flex; align-items:center; justify-content:center;
+    cursor:pointer; transition:border-color .2s;
+  }
+  .drop:hover, .drop.over{border-color:var(--detect)}
+  .drop:focus-visible{outline:2px solid var(--detect); outline-offset:3px}
+  #field{position:absolute; inset:0; width:100%; height:100%}
+  .drop-inner{position:relative; text-align:center; padding:32px; pointer-events:none}
+  .drop-inner .big{font-size:17px; margin-bottom:6px}
+  .drop-inner .small{color:var(--dim); font-size:13px}
+  input[type=file]{display:none}
+
+  .stage{display:none; margin-top:36px}
+  .stage.show{display:block}
+  #out{width:100%; border-radius:14px; border:1px solid var(--line); display:block}
+
+  .readout{
+    display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+    gap:1px; background:var(--line); border:1px solid var(--line);
+    border-radius:14px; overflow:hidden; margin-top:14px;
+  }
+  .cell{background:var(--panel); padding:18px 20px}
+  .cell .k{color:var(--dim); font-size:11px; letter-spacing:.14em; text-transform:uppercase}
+  .cell .v{font-family:'Fraunces',serif; font-weight:500; font-size:30px; margin-top:6px}
+  .cell .v.detect{color:var(--detect)}
+  .cell .v.amber{color:var(--amber)}
+  .cell .note{color:var(--dim); font-size:12px; margin-top:4px}
+
+  .again{
+    margin-top:18px; background:none; border:1px solid var(--line); color:var(--star);
+    font-family:inherit; font-size:14px; padding:10px 18px; border-radius:8px; cursor:pointer;
+  }
+  .again:hover{border-color:var(--detect); color:var(--detect)}
+  .status{color:var(--dim); font-size:13px; margin-top:14px; min-height:18px}
+  .status.error{color:#E5766B}
+
+  footer{margin-top:64px; color:var(--dim); font-size:12px; line-height:1.7; border-top:1px solid var(--line); padding-top:20px}
+  footer code{font-family:monospace; color:var(--star)}
+  @media (prefers-reduced-motion: reduce){ .tw{animation:none !important} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">star<em>count</em></div>
+    <div class="tag">prototype v0.2 — detection runs server-side</div>
+  </header>
+
+  <h1>How many stars are in <em>your</em> sky tonight?</h1>
+  <p class="sub">Drop in a photo of the night sky. Starcount subtracts the light-pollution
+  background, hunts for point sources, and gives your sky a darkness score.</p>
+
+  <div class="drop" id="drop" tabindex="0" role="button" aria-label="Upload a night sky photo">
+    <canvas id="field" aria-hidden="true"></canvas>
+    <div class="drop-inner">
+      <div class="big">Drop a night-sky photo here</div>
+      <div class="small">or click to choose a file · JPG or PNG</div>
+    </div>
+    <input type="file" id="file" accept="image/*">
+  </div>
+  <div class="status" id="status"></div>
+
+  <div class="stage" id="stage">
+    <img id="out" alt="Annotated night sky with detected stars circled">
+    <div class="readout">
+      <div class="cell"><div class="k">Stars detected</div><div class="v detect" id="nstars">—</div></div>
+      <div class="cell"><div class="k">Sky score</div><div class="v amber" id="score">—</div><div class="note" id="scorenote"></div></div>
+      <div class="cell"><div class="k">Detection threshold</div><div class="v" id="thresh">5σ</div><div class="note">above background noise</div></div>
+    </div>
+    <button class="again" id="again">Try another photo</button>
+  </div>
+
+  <footer>
+    Pipeline: grayscale → <code>photutils.Background2D</code> median background estimation →
+    subtract → robust σ via sigma-clipped stats → <code>photutils.DAOStarFinder</code>
+    matched-filter detection at 5σ → centroid &amp; count. Runs server-side in a FastAPI backend.
+  </footer>
+</div>
+
+<script>
+// Twinkling starfield in the drop zone (decorative)
+(function(){
+  const c=document.getElementById('field'), x=c.getContext('2d');
+  let stars=[];
+  function size(){
+    c.width=c.offsetWidth; c.height=c.offsetHeight;
+    stars=Array.from({length:90},()=>({
+      x:Math.random()*c.width, y:Math.random()*c.height,
+      r:Math.random()*1.3+0.3, p:Math.random()*Math.PI*2, s:0.5+Math.random()*1.5
+    }));
+  }
+  size(); addEventListener('resize',size);
+  const reduced=matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function draw(t){
+    x.clearRect(0,0,c.width,c.height);
+    for(const s of stars){
+      const a=reduced?0.7:0.35+0.55*Math.abs(Math.sin(t/1000*s+s.p));
+      x.globalAlpha=a; x.fillStyle='#F2EFE4';
+      x.beginPath(); x.arc(s.x,s.y,s.r,0,7); x.fill();
+    }
+    x.globalAlpha=1;
+    if(!reduced) requestAnimationFrame(draw);
+  }
+  requestAnimationFrame(draw);
+})();
+
+const drop=document.getElementById('drop'), file=document.getElementById('file'),
+      stage=document.getElementById('stage'), out=document.getElementById('out'),
+      status=document.getElementById('status');
+
+drop.addEventListener('click',()=>file.click());
+drop.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' ')file.click();});
+['dragover','dragenter'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('over');}));
+['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('over');}));
+drop.addEventListener('drop',e=>{ if(e.dataTransfer.files[0]) handle(e.dataTransfer.files[0]); });
+file.addEventListener('change',()=>{ if(file.files[0]) handle(file.files[0]); });
+document.getElementById('again').addEventListener('click',()=>{
+  stage.classList.remove('show'); drop.style.display='flex';
+  status.textContent=''; status.classList.remove('error'); file.value='';
+});
+
+async function handle(f){
+  status.classList.remove('error');
+  status.textContent='Uploading and hunting for stars…';
+
+  const form=new FormData();
+  form.append('file', f);
+
+  try{
+    const res=await fetch('/api/detect', {method:'POST', body:form});
+    if(!res.ok){
+      const err=await res.json().catch(()=>({detail:'Detection failed.'}));
+      throw new Error(err.detail || 'Detection failed.');
+    }
+    const data=await res.json();
+    render(data);
+  }catch(e){
+    status.classList.add('error');
+    status.textContent=e.message || 'Something went wrong — try another photo.';
+  }
+}
+
+function render(data){
+  out.src=data.annotated_image;
+  const score=data.score;
+  const notes=['Bright city sky','Suburban sky','Decent dark sky','Excellent dark sky'];
+  const note=notes[Math.min(3,(score/26)|0)];
+
+  document.getElementById('nstars').textContent=data.n_stars.toLocaleString();
+  document.getElementById('score').textContent=score+'/100';
+  document.getElementById('scorenote').textContent=note;
+  drop.style.display='none';
+  stage.classList.add('show');
+  status.textContent=data.n_stars===0
+    ? 'No stars found — is this a night-sky photo? Try one with visible stars.'
+    : 'Detection complete. Circles mark each detected star.';
+}
+</script>
+</body>
+</html>
